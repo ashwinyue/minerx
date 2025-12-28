@@ -25,47 +25,48 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	appsv1alpha1 "github.com/ashwinyue/minerx/api/v1alpha1"
+	"github.com/ashwinyue/minerx/pkg/condition"
 )
 
 var _ = Describe("Miner Controller", func() {
 	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+		const resourceName = "test-miner"
 
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
-		miner := &appsv1alpha1.Miner{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind Miner")
-			err := k8sClient.Get(ctx, typeNamespacedName, miner)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &appsv1alpha1.Miner{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
-					},
-					// TODO(user): Specify other spec details if needed.
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			By("creating custom resource for Kind Miner")
+			resource := &appsv1alpha1.Miner{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: appsv1alpha1.MinerSpec{
+					ChainName:     "test-chain",
+					MinerType:     appsv1alpha1.MinerTypeSmall,
+					RestartPolicy: corev1.RestartPolicyAlways,
+				},
 			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &appsv1alpha1.Miner{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("Cleanup the specific resource instance Miner")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			if !errors.IsNotFound(err) {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			}
 		})
+
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &MinerReconciler{
@@ -77,8 +78,108 @@ var _ = Describe("Miner Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			By("Checking if Pod was created")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, pod)).To(Succeed())
+
+			By("Checking Miner status")
+			miner := &appsv1alpha1.Miner{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, miner)).To(Succeed())
+			Expect(miner.Status.Phase).To(Equal(appsv1alpha1.MinerPhaseProvisioning))
+			Expect(miner.Status.PodRef).NotTo(BeNil())
+		})
+
+		It("should update status when pod is ready", func() {
+			By("Creating a ready pod")
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+					Annotations: map[string]string{
+						"miner.onex.io/name": resourceName,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "miner", Image: "nginx:alpine"},
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   corev1.PodReady,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+			By("Reconciling the resource")
+			controllerReconciler := &MinerReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking Miner status is Running")
+			miner := &appsv1alpha1.Miner{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, miner)).To(Succeed())
+			Expect(miner.Status.Phase).To(Equal(appsv1alpha1.MinerPhaseRunning))
+
+			By("Checking conditions")
+			hasReadyCondition := false
+			for _, cond := range miner.Status.Conditions {
+				if cond.Type == string(condition.MinerPodHealthyCondition) {
+					hasReadyCondition = true
+					Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				}
+			}
+			Expect(hasReadyCondition).To(BeTrue())
+		})
+
+		It("should handle deletion correctly", func() {
+			By("Creating a pod")
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "miner", Image: "nginx:alpine"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+			By("Deleting the miner")
+			miner := &appsv1alpha1.Miner{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, miner)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, miner)).To(Succeed())
+
+			By("Reconciling deletion")
+			controllerReconciler := &MinerReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Checking if pod was deleted")
+			Eventually(func() bool {
+				podErr := k8sClient.Get(ctx, typeNamespacedName, &corev1.Pod{})
+				return errors.IsNotFound(podErr)
+			}, "10s").Should(BeTrue())
 		})
 	})
 })

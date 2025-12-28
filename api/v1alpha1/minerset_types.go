@@ -163,6 +163,16 @@ type MinerSetList struct {
 	Items           []MinerSet `json:"items"`
 }
 
+// GetConditions returns the conditions of the minerset.
+func (ms *MinerSet) GetConditions() []metav1.Condition {
+	return ms.Status.Conditions
+}
+
+// SetConditions sets the conditions of the minerset.
+func (ms *MinerSet) SetConditions(conditions []metav1.Condition) {
+	ms.Status.Conditions = conditions
+}
+
 func init() {
 	SchemeBuilder.Register(&MinerSet{}, &MinerSetList{})
 }

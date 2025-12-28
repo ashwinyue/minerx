@@ -1,0 +1,38 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - apps.onex.io
+  resources:
+  - chains
+  - miners
+  - minersets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.onex.io
+  resources:
+  - chains/finalizers
+  - miners/finalizers
+  - minersets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - apps.onex.io
+  resources:
+  - chains/status
+  - miners/status
+  - minersets/status
+  verbs:
+  - get
+  - patch
+  - update

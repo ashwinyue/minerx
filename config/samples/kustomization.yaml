@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- apps_v1alpha1_miner.yaml
+- apps_v1alpha1_chain.yaml
+- apps_v1alpha1_minerset.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

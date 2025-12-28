@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -45,12 +46,24 @@ type ChainReconciler struct {
 // +kubebuilder:rbac:groups=apps.onex.io,resources=chains,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.onex.io,resources=chains/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps.onex.io,resources=chains/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps.onex.io,resources=miners,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ChainReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1alpha1.Chain{}).
 		Complete(r)
+}
+
+func (r *ChainReconciler) lowestNonZeroResult(a, b ctrl.Result) ctrl.Result {
+	if a.RequeueAfter < b.RequeueAfter {
+		return a
+	}
+	if a.Requeue {
+		return a
+	}
+	return b
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -103,22 +116,123 @@ func (r *ChainReconciler) reconcile(ctx context.Context, chain *appsv1alpha1.Cha
 		}
 	}
 
-	condition.SetTrue(chain, condition.InfrastructureReadyCondition)
+	phases := []func(context.Context, *appsv1alpha1.Chain) (ctrl.Result, error){
+		r.reconcileConfigMap,
+		r.reconcileMiner,
+	}
 
+	result := ctrl.Result{}
+	for _, phase := range phases {
+		phaseResult, err := phase(ctx, chain)
+		if err != nil {
+			log.Error(err, "Failed to execute reconciliation phase")
+			return ctrl.Result{}, err
+		}
+		result = r.lowestNonZeroResult(result, phaseResult)
+	}
+
+	// Update status
+	chain.Status.ObservedGeneration = chain.Generation
 	if err := r.Status().Update(ctx, chain); err != nil {
 		log.Error(err, "Failed to update Chain status")
 		return ctrl.Result{}, err
 	}
 
 	log.Info("Chain reconciled successfully")
+	return result, nil
+}
+
+func (r *ChainReconciler) reconcileConfigMap(ctx context.Context, chain *appsv1alpha1.Chain) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	reconciled, err := r.IsConfigMapReconciled(ctx, chain)
+	if err != nil {
+		log.Error(err, "Failed to check if ConfigMap is reconciled")
+		return ctrl.Result{}, err
+	}
+	if reconciled {
+		return ctrl.Result{}, nil
+	}
+
+	cm, err := r.createConfigMap(ctx, chain)
+	if err != nil {
+		log.Error(err, "Failed to create ConfigMap")
+		condition.SetFalse(chain, condition.ConfigMapsCreatedCondition, condition.FailedReason, fmt.Sprintf("Failed to create ConfigMap: %v", err))
+		return ctrl.Result{}, err
+	}
+
+	chain.Status.ConfigMapRef = &appsv1alpha1.LocalObjectReference{Name: cm.Name}
+
+	log.Info("Created ConfigMap", "configMap", cm.Name)
+	condition.SetTrue(chain, condition.ConfigMapsCreatedCondition)
+
 	return ctrl.Result{}, nil
 }
 
-func createConfigMap(ctx context.Context, chain *appsv1alpha1.Chain) (*corev1.ConfigMap, error) {
+func (r *ChainReconciler) IsConfigMapReconciled(ctx context.Context, chain *appsv1alpha1.Chain) (bool, error) {
+	log := log.FromContext(ctx)
+
+	cmList := &corev1.ConfigMapList{}
+	selectorMap := map[string]string{"chain.onex.io/name": chain.Name}
+	if err := r.List(ctx, cmList, client.InNamespace(chain.Namespace), client.MatchingLabels(selectorMap)); err != nil {
+		log.Error(err, "Failed to list ConfigMaps")
+		return false, err
+	}
+
+	return len(cmList.Items) != 0, nil
+}
+
+func (r *ChainReconciler) reconcileMiner(ctx context.Context, chain *appsv1alpha1.Chain) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	reconciled, err := r.IsMinerReconciled(ctx, chain)
+	if err != nil {
+		log.Error(err, "Failed to check if Miner is reconciled")
+		return ctrl.Result{}, err
+	}
+	if reconciled {
+		return ctrl.Result{}, nil
+	}
+
+	miner, err := r.createMinerForChain(ctx, chain)
+	if err != nil {
+		log.Error(err, "Failed to create Miner")
+		condition.SetFalse(chain, condition.MinersCreatedCondition, condition.FailedReason, fmt.Sprintf("Failed to create Miner: %v", err))
+		return ctrl.Result{}, err
+	}
+
+	if chain.Status.MinerRef == nil {
+		chain.Status.MinerRef = &appsv1alpha1.LocalObjectReference{Name: miner.Name}
+	}
+
+	log.Info("Created Miner", "miner", miner.Name)
+	condition.SetTrue(chain, condition.MinersCreatedCondition)
+
+	return ctrl.Result{}, nil
+}
+
+func (r *ChainReconciler) IsMinerReconciled(ctx context.Context, chain *appsv1alpha1.Chain) (bool, error) {
+	log := log.FromContext(ctx)
+
+	mList := &appsv1alpha1.MinerList{}
+	selectorMap := map[string]string{"chain.onex.io/name": chain.Name}
+	if err := r.List(ctx, mList, client.InNamespace(chain.Namespace), client.MatchingLabels(selectorMap)); err != nil {
+		log.Error(err, "Failed to list Miners")
+		return false, err
+	}
+
+	return len(mList.Items) != 0, nil
+}
+
+func (r *ChainReconciler) createConfigMap(ctx context.Context, chain *appsv1alpha1.Chain) (*corev1.ConfigMap, error) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      chain.Name,
-			Namespace: chain.Namespace,
+			GenerateName: fmt.Sprintf("%s-", chain.Name),
+			Namespace:    chain.Namespace,
+			Labels:       map[string]string{"chain.onex.io/name": chain.Name},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(chain, chainKind),
+			},
 		},
 		Data: map[string]string{
 			"chainName": chain.Name,
@@ -129,11 +243,12 @@ func createConfigMap(ctx context.Context, chain *appsv1alpha1.Chain) (*corev1.Co
 	return cm, nil
 }
 
-func createMinerForChain(ctx context.Context, chain *appsv1alpha1.Chain) (*appsv1alpha1.Miner, error) {
+func (r *ChainReconciler) createMinerForChain(ctx context.Context, chain *appsv1alpha1.Chain) (*appsv1alpha1.Miner, error) {
 	miner := &appsv1alpha1.Miner{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      chain.Name,
 			Namespace: chain.Namespace,
+			Labels:    map[string]string{"chain.onex.io/name": chain.Name},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(chain, chainKind),
 			},

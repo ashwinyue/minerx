@@ -1,0 +1,50 @@
+# Kind Cluster Configuration for MinerX Testing
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: minerx-test
+
+# Control Plane Settings
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.28.0
+    # Port mappings for accessing services
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 30080
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+      - containerPort: 30443
+        hostPort: 30443
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+
+  # Worker nodes for testing
+  - role: worker
+    image: kindest/node:v1.28.0
+  - role: worker
+    image: kindest/node:v1.28.0
+
+# Networking Configuration
+networking:
+  # Default pod subnet
+  podSubnet: "10.244.0.0/16"
+  # Default service subnet
+  serviceSubnet: "10.96.0.0/12"
+  # Disable default CNI (optional, for custom CNI testing)
+  disableDefaultCNI: false
+  # kube-proxy mode
+  kubeProxyMode: "iptables"
+
+# kubeadm configuration patches
+kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiVersion: kubeadm.k8s.io/v1beta3
+    networking:
+      dnsDomain: "minerx.local"
+  - |
+    kind: InitConfiguration
+    apiVersion: kubeadm.k8s.io/v1beta3
+    nodeRegistration:
+      kubeletExtraArgs:
+        - "--node-labels=minerx-worker=true"
